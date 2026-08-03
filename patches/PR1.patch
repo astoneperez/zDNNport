@@ -1,0 +1,464 @@
+diff --git a/config.zdnn b/config.zdnn
+index 865a16b..900d6fc 100644
+--- a/config.zdnn
++++ b/config.zdnn
+@@ -53,6 +53,38 @@ case "${target}" in
+ 	ZDNN_INSTALL_TARGETS="install_libsoname install_static"
+ 	;;
+     *-OS/390)
++	CC=${CC:-clang}
++	CXX=${CXX:-clang++}
++	LD=${LD:-clang++}
++	AR=${AR:-ar}
++	ARFLAGS="${ARFLAGS:--rc}"
++	CFLAGS_INIT="-O3 -mzvector -Wall -std=gnu11 -fstack-protector-all ${CFLAGS_INIT:-}"
++	CFLAGS_QUOTE_INIT="-Wall"
++	CFLAGS_OPT_EXPENSIVE="-funroll-loops"
++	CFLAGS="-O3 -march=z14 -mzvector -Wall -std=gnu11 -fstack-protector-all ${CFLAGS_OPT_EXPENSIVE} ${CFLAGS:-}"
++	CFLAGS_QUOTE="-Wall"
++	CFLAGS_DEBUG="-O0 -g3 ${CFLAGS_DEBUG:-}"
++	CFLAGS_SHARED="-fPIC ${CFLAGS_SHARED:-}"
++	CFLAGS_ASM="-fno-asynchronous-unwind-tables ${CFLAGS_ASM:-}"
++	CFLAGS_NOSEARCH=""
++	CXXFLAGS="-O3 -march=z14 -Wall ${CXXFLAGS:-}"
++	CPP_SYMCHECK_FLAGS="-E -o zdnn.i"
++	SODIR="${SODIR:-lib}"
++	LIBNAME="${LIBNAME:-libzdnn}"
++	LIBSONAME="${LIBSONAME:-${LIBNAME}.so.0}"
++	LIBNAME_PRIVATE="${LIBNAME_PRIVATE:-${LIBNAME}-private}"
++	LIBSONAME_PRIVATE="${LIBSONAME_PRIVATE:-${LIBNAME_PRIVATE}.so.0}"
++	LDFLAGS="${LDFLAGS:-}"
++	LDFLAGS_SHARED="-shared -lm ${LDFLAGS_SHARED:-} ${LDFLAGS:-}"
++	LDFLAGS_SHARED_EXPORTALL="-shared -lm ${LDFLAGS_SHARED_EXPORTALL:-} ${LDFLAGS:-}"
++	LDFLAGS_TEST="-L ../zdnn/${SODIR} -l${LIBNAME_PRIVATE#lib} ../zdnn/${SODIR}/${LIBNAME_PRIVATE}.so -lm ${LDFLAGS_TEST:-} ${LDFLAGS:-}"
++	LD_PATH_VAR="${LD_PATH_VAR:-LIBPATH}"
++	ECHOFLAGS=""
++	ZDNN_TMAKE_FILES="t-static t-libsoname t-gccexpo t-symcheck t-listings"
++	ZDNN_MAKE_TARGETS="${SODIR}/${LIBNAME}.a libsoname symcheck"
++	ZDNN_INSTALL_TARGETS="install_libsoname install_static"
++	;;
++    DISABLED-xlc-OS/390)
+ 	CC=${CC:-xlc}
+ 	CXX=${CXX:-xlC}
+ 	LD=${LD:-xlC}
+diff --git a/zdnn/convert_hw.c b/zdnn/convert_hw.c
+index d9ff305..afde76b 100644
+--- a/zdnn/convert_hw.c
++++ b/zdnn/convert_hw.c
+@@ -37,14 +37,19 @@ vec_char8 selection_vector = {0,  1,  4,  5,  8,  9,  12, 13,
+                               16, 17, 20, 21, 24, 25, 28, 29};
+ static vec_int16 zero_vector16 = {0, 0, 0, 0, 0, 0, 0, 0};
+ // 4 vector of the MIN DFL16 value represented as FP32
++#if defined(__MVS__) && defined(__clang__)
++static const vec_float32 dlflt_min_vec = {0xCFFF8000, 0xCFFF8000, 0xCFFF8000, 0xCFFF8000};
++static const vec_float32 dlflt_max_vec = {0x4FFF8000, 0x4FFF8000, 0x4FFF8000, 0x4FFF8000};
++static const vec_float32 dlflt_inf_vec = {0x7F800000, 0x7F800000, 0x7F800000, 0x7F800000};
++#else
+ static const vector float dlflt_min_vec = {
+     DLF16_MIN_AS_FP32, DLF16_MIN_AS_FP32, DLF16_MIN_AS_FP32, DLF16_MIN_AS_FP32};
+-// 4 vector of the MAX DFL16 value represented as FP32
+ static const vector float dlflt_max_vec = {
+     DLF16_MAX_AS_FP32, DLF16_MAX_AS_FP32, DLF16_MAX_AS_FP32, DLF16_MAX_AS_FP32};
+-
+ static const vector float dlflt_inf_vec = {INFINITY, INFINITY, INFINITY,
+                                            INFINITY};
++#endif
++
+ /***********************************************************************
+  * aiu_vec_round_from_fp32 routines
+  *
+@@ -61,7 +66,7 @@ static vec_int16 inline aiu_vec_round_from_fp32_inline(vec_float32 a,
+                                                        vec_float32 b) {
+   vec_int16 out;
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   /*
+        Invoke the VCRNF
+                   "*     VCRNF VReg0,VRegL,VRegR,mask2,0        \n\t"
+@@ -84,6 +89,13 @@ static vec_int16 inline aiu_vec_round_from_fp32_inline(vec_float32 a,
+                  :  /* "%v0", "%v1", "%v2"   Clobbered */
+   );
+ // clang-format on
++#elif defined(__clang__)
++  __asm volatile("         VL    1,%[in_vector_left]         \n"
++                 "         VL    2,%[in_vector_right]        \n"
++                 "         VCRNF 0,1,2,2,0                   \n"
++                 "         VST   0,%[out_vector]             \n"
++                 : [out_vector] "=m"(out)
++                 : [in_vector_left] "m"(a), [in_vector_right] "m"(b));
+ #else
+   // clang-format off
+   __asm volatile(".insn vrr,0xe60000000075,%[out],%[in_hi],%[in_lo],0,2,0"
+@@ -115,7 +127,7 @@ vec_int16 aiu_vec_round_from_fp32(vec_float32 a, vec_float32 b) {
+ static vec_int16 inline aiu_vec_convert_from_fp16_inline(vec_int16 a) {
+   vec_int16 out;
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   /*
+       Invoke the VCNF
+                  "*     VCNF VReg0,VReg1,,mask1,0        \n\t"
+@@ -136,6 +148,12 @@ static vec_int16 inline aiu_vec_convert_from_fp16_inline(vec_int16 a) {
+                  :  /* "%v0", "%v1"   Clobbered */
+                 // clang-format on
+   );
++#elif defined(__clang__)
++  __asm volatile("         VL    1,%[in_vector]              \n"
++                 "         VCNF  0,1,1,0                     \n"
++                 "         VST   0,%[out_vector]             \n"
++                 : [out_vector] "=m"(out)
++                 : [in_vector] "m"(a));
+ #else
+   // clang-format off
+     __asm volatile(".insn vrr,0xe60000000055,%[out],%[in_vec],0,0,1,0"
+@@ -170,7 +188,7 @@ static void inline aiu_vec_lengthen_to_fp32_inline(vec_int16 a,
+   vec_float32 work_float_1;
+   vec_float32 work_float_2;
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   /*
+    *  Invoke the VCLFNx
+    *  "*     VCLFN(H/L) VReg0,VReg2,mask0,mask2      \n\t"
+@@ -194,6 +212,17 @@ static void inline aiu_vec_lengthen_to_fp32_inline(vec_int16 a,
+   // clang-format on
+   *out1 = work_float_1;
+   *out2 = work_float_2;
++#elif defined(__clang__)
++  __asm volatile("         VL     2,%[in_vector]             \n"
++                 "         VCLFNH 0,2,0,2                    \n"
++                 "         VCLFNL 1,2,0,2                    \n"
++                 "         VST    0,%[out_vector_left]       \n"
++                 "         VST    1,%[out_vector_right]      \n"
++                 : [out_vector_left] "=m"(work_float_1),
++                   [out_vector_right] "=m"(work_float_2)
++                 : [in_vector] "m"(a));
++  *out1 = work_float_1;
++  *out2 = work_float_2;
+ #else
+   // clang-format off
+   __asm volatile(".insn vrr,0xe60000000056,%[out1],%[in_vec],0,2,0,0    \n\t"
+@@ -230,7 +259,7 @@ void aiu_vec_lengthen_to_fp32(vec_int16 a, vec_float32 *out1,
+ static vec_int16 inline aiu_vec_convert_to_fp16_inline(vec_int16 a) {
+   vec_int16 work_short_1;
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   /*
+    *  Invoke the VCFN
+    *  "*     VCFN VReg0,VReg2,mask0,mask1      \n\t"
+@@ -249,6 +278,12 @@ static vec_int16 inline aiu_vec_convert_to_fp16_inline(vec_int16 a) {
+                  :  /* "%v0", "%v2"   Clobbered */
+     );
+   // clang-format on
++#elif defined(__clang__)
++  __asm volatile("         VL    2,%[in_vector]              \n"
++                 "         VCFN  0,2,0,1                     \n"
++                 "         VST   0,%[out_vector]             \n"
++                 : [out_vector] "=m"(work_short_1)
++                 : [in_vector] "m"(a));
+ #else
+   // clang-format off
+   __asm volatile(".insn vrr,0xe6000000005D,%[out_vec],%[in_vec],0,1,0,0  \n\t"
+@@ -546,8 +581,8 @@ void saturate_fp32_to_dlf16(const vec_float32 *in_vector_left,
+                             vec_float32 *out_vector_right) {
+ 
+   // Create temp vectors for output
+-  vector float temp_left = (vector float)*in_vector_left;
+-  vector float temp_right = (vector float)*in_vector_right;
++  vec_float32 temp_left = *in_vector_left;
++  vec_float32 temp_right = *in_vector_right;
+ 
+   // For each left and right vectors:
+   // 1. Perform a bitwise AND on the original input vector with dlflt_inf_vec to
+@@ -665,7 +700,7 @@ uint64_t fp32_to_dlf16(float *input_data, uint16_t *output_data,
+     if (curnbr_fields_to_convert > 4) /* if more than 4, partially
+                                       load right vector from data */
+       in_vector_right =
+-          (vec_float32)vec_load_len((const float *)cur_input_data,
++          (vec_float32)vec_load_len((const unsigned int *)cur_input_data,
+                                     (curnbr_fields_to_convert - 4) * 4 - 1); /*
+                                        Partial load right vector with proper
+                                        number of FP32 elements */
+@@ -674,7 +709,7 @@ uint64_t fp32_to_dlf16(float *input_data, uint16_t *output_data,
+   } else { /* Else there are less than 4 values, so partially
+                 load the left, and clear the right */
+     in_vector_left = (vec_float32)vec_load_len(
+-        (const float *)cur_input_data, curnbr_fields_to_convert * 4 - 1);
++        (const unsigned int *)cur_input_data, curnbr_fields_to_convert * 4 - 1);
+     in_vector_right = (vec_float32){0, 0, 0, 0};
+   }
+ 
+diff --git a/zdnn/query.c b/zdnn/query.c
+index fa3b452..5e9f054 100644
+--- a/zdnn/query.c
++++ b/zdnn/query.c
+@@ -20,7 +20,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+ #include <cvt.h>
+ #include <ihaecvt.h>
+ #include <ihafacl.h>
+diff --git a/zdnn/status.c b/zdnn/status.c
+index 550e835..a8a86a3 100644
+--- a/zdnn/status.c
++++ b/zdnn/status.c
+@@ -330,7 +330,7 @@ zdnn_status set_zdnn_status(zdnn_status status, const char *func_name,
+            "===\n");
+     printf("status = 0x%08x, %s\n", status, zdnn_get_status_message(status));
+ 
+-#ifdef __MVS__
++#if defined(__MVS__) && !defined(__clang__)
+ 
+ #define DUMP_TITLE_SIZE 64
+     printf("Invoking CEE3DMP Language Environment callable service...\n");
+@@ -345,7 +345,7 @@ zdnn_status set_zdnn_status(zdnn_status status, const char *func_name,
+       printf("Failed to invoke CEE3DMP. Return Code: %d.\n", rtn);
+     }
+ 
+-#else
++#elif !defined(__MVS__)
+ 
+ #define MAX_STACK_ENTRIES 30 // max num of stack entries to print
+     printf("Backtrace:\n");
+@@ -364,6 +364,10 @@ zdnn_status set_zdnn_status(zdnn_status status, const char *func_name,
+       free(strings);
+     }
+ 
++#else
++    /* clang on z/OS: no backtrace or ctrace available */
++    printf("Backtrace not available on this platform.\n");
++
+ #endif // __MVS__
+ 
+     printf("==================================================================="
+diff --git a/zdnn/stickify.c b/zdnn/stickify.c
+index c45256b..39bca7d 100644
+--- a/zdnn/stickify.c
++++ b/zdnn/stickify.c
+@@ -41,7 +41,7 @@
+ /// prefetch
+ ///
+ static inline void prefetch_read(const void *ptr, uintptr_t offset) {
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   __dcbt((void *)((uintptr_t)ptr + offset));
+ #else
+   __builtin_prefetch((void *)((uintptr_t)ptr + offset), 0);
+@@ -54,7 +54,7 @@ static inline void prefetch_read(const void *ptr, uintptr_t offset) {
+ /// prefetch
+ ///
+ static inline void prefetch_write(const void *ptr, uintptr_t offset) {
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   __dcbtst((void *)((uintptr_t)ptr + offset));
+ #else
+   __builtin_prefetch((void *)((uintptr_t)ptr + offset), 1);
+@@ -66,7 +66,7 @@ static inline void prefetch_write(const void *ptr, uintptr_t offset) {
+ /// \param[in] offset from the base address to the memory block to flush
+ ///
+ static inline void cache_flush(const void *ptr, uintptr_t offset) {
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   __dcbf((void *)((uintptr_t)ptr + offset));
+ #else
+   // No equivalent for non-MVS, leave empty or add necessary code
+diff --git a/zdnn/zdnn.c b/zdnn/zdnn.c
+index ca705ea..8bb22a6 100644
+--- a/zdnn/zdnn.c
++++ b/zdnn/zdnn.c
+@@ -23,7 +23,7 @@
+ #include <string.h>
+ #include <strings.h>
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+ #include <cvt.h>
+ #include <ihaecvt.h>
+ #include <ihafacl.h>
+@@ -276,7 +276,7 @@ zdnn_status invoke_nnpa(uint8_t function_code, char *parm_block,
+   }
+ 
+   // clang-format off
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined(__clang__)
+   struct psa *psaptr =
+       (struct psa *)0;
+   // set _cvt to x10, the pointer to the CVT on z/OS
+@@ -305,7 +305,24 @@ zdnn_status invoke_nnpa(uint8_t function_code, char *parm_block,
+         return ZDNN_STATUS(ZDNN_UNAVAILABLE_FUNCTION,
+                        "NNPA facility unavailable", NO_ARG);
+   }
+-
++#elif defined(__clang__) && defined(__MVS__)
++  // clang on z/OS: use STFLE to check NNPA, HLASM NNPA mnemonic
++  if (zdnn_is_nnpa_installed()) {
++    __asm volatile(
++       "         LLGC  0,%[valfunctionCode]     \n"
++       "         LG    1,%[parm_block]          \n"
++       "         NNPA                           \n"
++       "         IPM   %[cc]                    \n"
++       "         SRL   %[cc],28                 \n"
++       "         LGR   %[areannpa_return],0     \n"
++       : [cc] "+d" (cc),
++         [areannpa_return] "=d" (rtn.r0)
++       : [valfunctionCode] "m" (function_code),
++         [parm_block] "m" (parm_block)
++       : "r0", "r1", "cc");
++  } else {
++	  return ZDNN_STATUS(ZDNN_UNAVAILABLE_FUNCTION, "NNPA facility unavailable", NO_ARG);
++  }
+ #else
+     register uint64_t r0 __asm__("%r0") = function_code;
+     register uint64_t r1 __asm__("%r1") = (uint64_t)parm_block;
+@@ -353,7 +370,7 @@ zdnn_status invoke_nnpa(uint8_t function_code, char *parm_block,
+ /// possible on NNPA_QAF.
+ ///
+ zdnn_status invoke_nnpa_query(nnpa_qaf_parameter_block *qpb) {
+-#if defined(__MVS__)
++#if defined(__MVS__) && !defined (__clang__)
+   /***********************************************************************
+    * On z/OS, use system copy of STFLE output ("faclnnpaf").  (LoZ has to
+    * worry about dynamic changes to STFLE.  z/OS does not support that so
+diff --git a/zdnn/zdnn_init.c b/zdnn/zdnn_init.c
+index 1737854..d6dbfa0 100644
+--- a/zdnn/zdnn_init.c
++++ b/zdnn/zdnn_init.c
+@@ -21,7 +21,11 @@
+ #include <string.h>
+ #include <strings.h>
+ 
+-#if defined(__MVS__)
++#if defined(__MVS__) && defined(__clang__)
++extern int strcasecmp(const char *, const char *);
++#endif
++
++#if defined(__MVS__) && !defined(__clang__)
+ #include <cvt.h>
+ #include <ihaecvt.h>
+ #include <ihafacl.h>
+@@ -115,34 +119,54 @@ void zdnn_init() {
+   }
+ }
+ 
+-#ifndef __MVS__
++#if !defined(__MVS__) || defined(__clang__)
+ #define STFLE_LENGTH 32
+ 
++#if defined(__clang__) && defined(__MVS__)
++static int invoke_stfle(unsigned char *facility_list) {
++  register uint64_t r0 __asm__("%r0") = STFLE_LENGTH / 8 - 1;
++  int cc;
++  struct facility_list_type {
++    unsigned char flist[STFLE_LENGTH];
++  };
++
++  if (precheck_enabled) {
++    if ((uintptr_t)facility_list & 7)
++      return ZDNN_STATUS_NO_MSG(ZDNN_MISALIGNED_PARMBLOCK);
++  }
++
++  __asm volatile(
++       "         STFLE 0(%[flist])               \n"
++       "         IPM   %[cc]                     \n"
++       "         SRL   %[cc],28                  \n"
++       : [cc] "=d"(cc), "+d"(r0)
++       : [flist] "a"(facility_list)
++       : "memory", "cc");
++  return cc;
++}
++#else
+ static int invoke_stfle(unsigned char *facility_list) {
+   register uint64_t r0 __asm__("%r0") = STFLE_LENGTH / 8 - 1;
+   int cc;
+   struct facility_list_type {
+-    // cppcheck-suppress unusedStructMember
+     unsigned char flist[STFLE_LENGTH];
+   };
+ 
+   if (precheck_enabled) {
+-    // ensure facility_list is on a doubleword boundary.
+     if ((uintptr_t)facility_list & 7)
+       return ZDNN_STATUS_NO_MSG(ZDNN_MISALIGNED_PARMBLOCK);
+   }
+ 
+-  // clang-format off
+   __asm__ __volatile__("stfle   %[flist]"                 "\n\t"
+                        "ipm     %[cc]"                    "\n\t"
+                        "srl     %[cc],28"                 "\n\t"
+                        : [flist] "+Q"(*((struct facility_list_type*)facility_list)),
+-			 "+d"(r0), [cc] "=d"(cc)
++                         "+d"(r0), [cc] "=d"(cc)
+                        :
+                        : "memory", "cc");
+-  // clang-format on
+   return cc;
+ }
++#endif
+ 
+ static inline int check_bitfield(const uint8_t *bitfield, int bitno) {
+   uint8_t mask = (1 << 7) >> (bitno & 7);
+@@ -174,6 +198,24 @@ bool zdnn_is_nnpa_installed() {
+ 
+   nnpa_supported = check_bitfield(facilities, STFLE_NNPA);
+ 
++  LOG_INFO("Hardware NNPA support available - %s",
++           nnpa_supported ? "TRUE" : "FALSE");
++
++  return nnpa_supported;
++#elif defined(__clang__)
++  /* clang on z/OS: cvt.h not available, use STFLE like Linux */
++  int nnpa_supported;
++  unsigned char facilities[STFLE_LENGTH] = {0};
++  int cc;
++  cc = invoke_stfle(facilities);
++
++  if (cc) {
++    LOG_ERROR("STFLE failed with %d", cc);
++    return false;
++  }
++
++  nnpa_supported = check_bitfield(facilities, STFLE_NNPA);
++
+   LOG_INFO("Hardware NNPA support available - %s",
+            nnpa_supported ? "TRUE" : "FALSE");
+ 
+diff --git a/zdnn/zdnn_private.h b/zdnn/zdnn_private.h
+index aad7eb0..cce3c1d 100644
+--- a/zdnn/zdnn_private.h
++++ b/zdnn/zdnn_private.h
+@@ -18,6 +18,12 @@
+ #ifndef ZDNN_ZDNN_PRIVATE_H_
+ #define ZDNN_ZDNN_PRIVATE_H_
+ 
++/* clang on z/OS: _Packed is XL C only; map to nothing, structs use __attribute__((packed)) */
++#if defined(__MVS__) && defined(__clang__)
++#define _Packed
++#define vector __vector
++#endif 
++
+ #include <stdarg.h>
+ #include <stdio.h>
+ 
+@@ -1547,7 +1553,7 @@ void dumpdata_ztensor(const zdnn_ztensor *ztensor, dump_mode mode,
+ #define PADDED(x)                                                              \
+   ((uint32_t)CEIL(x, AIU_2BYTE_CELLS_PER_STICK) * AIU_2BYTE_CELLS_PER_STICK)
+ 
+-#if !defined(vec_float) || __ARCH__ < 13
++#if (!defined(vec_float) || __ARCH__ < 13) && !(defined(__MVS__) && defined(__clang__))
+ #undef vec_float
+ #define vec_float(X)                                                           \
+   ({                                                                           \
+@@ -1560,7 +1566,7 @@ void dumpdata_ztensor(const zdnn_ztensor *ztensor, dump_mode mode,
+   })
+ #endif
+ 
+-#if defined(__GNUC__) && __GNUC__ <= 7
++#if defined(__GNUC__) && __GNUC__ <= 7 && !(defined(__MVS__) && defined(__clang__))
+ #undef vec_round
+ #define vec_round(X)                                                           \
+   ({                                                                           \
