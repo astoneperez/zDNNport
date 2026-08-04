@@ -2,7 +2,15 @@
 
 # zDNN
 
-IBM z Deep Neural Network (zDNN) Library for NNPA acceleration
+IBM z Deep Neural Network (zDNN) Library — provides a C API for the Neural Network Processing Assist (NNPA) facility on IBM z17 / LinuxONE 5 hardware.
+
+zDNN accelerates neural network operations (matrix multiply, activation functions, data format conversion) using the NNPA co-processor, which is particularly effective for prefill-dominated workloads such as embedding generation and LLM inference.
+
+This port enables zDNN to build and run on z/OS using the IBM Open Enterprise SDK for C/C++ (clang). The upstream project targets Linux on Z with GCC and IBM XL C; this port adds z/OS clang support.
+
+> **Hardware requirement:** NNPA acceleration requires IBM z17 / LinuxONE 5.
+> On earlier hardware (z15, z16), the library builds and initializes correctly
+> but `zdnn_is_nnpa_installed()` returns 0 and NNPA operations are unavailable.
 
 # Installation and Usage
 
@@ -10,25 +18,49 @@ Use the zopen package manager ([QuickStart Guide](https://zopen.community/#/Guid
 ```bash
 zopen install zDNN
 ```
-
 # Building from Source
-
-1. Clone the repository:
-```bash
+Clone the repository:
+```bash 
 git clone https://github.com/zopencommunity/zDNNport.git
 cd zDNNport
 ```
-2. Build using zopen:
+Build using zopen:
 ```bash
 zopen build -vv
 ```
 
-See the [zopen porting guide](https://zopen.community/#/Guides/Porting) for more details.
+See the zopen porting guide for more details.
+
+# z/OS Clang Port Notes
+The upstream zDNN library was written for Linux on Z (GCC) and z/OS (IBM XL C).
+This port adds support for building with clang on z/OS. Key changes are documented
+in ```patches/README.md``` and include:
+
+- New *-OS/390 clang case in ```config.zdnn``` (z/OS ```uname -m ```returns machine model, not s390x)
+- Clang compatibility macros for XL C extensions (```_Packed```, ```__vector```, ```vec_float```)
+- HLASM mnemonic inline asm replacing DC XL6'...' and GNU .insn syntax
+- STFLE-based NNPA detection replacing XL C CVT walk for clang
+- Guards for XL C-only system headers (```cvt.h```, ```ihaecvt.h```) and intrinsics (```__dcbt```, ```ctrace```)
+  
+Build dependencies: ```make```, ```autoconf```, ```automake```, ```coreutils```
+
+Build flags required: ```-fzvector``` ```-mzvector``` ```-march=z16``` ```-D_POSIX_C_SOURCE=200809L```
 
 # Documentation
+[Upstream zDNN documentation](https://github.com/ibm/zdnn) 
 
+[NNPA backend for llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/zDNN.md)
 
-# Troubleshooting
+# Troubleshooting 
+```zdnn_is_nnpa_installed()``` returns ```0```  
+&rarr; The machine does not have NNPA hardware. Requires IBM z17 / LinuxONE 5.
+
+Build fails with ```cannot use 'float' with '__vector'```  
+&rarr; Ensure ```-fzvector``` ```-mzvector``` ```-march=z16``` are in Z```OPEN_EXTRA_CFLAGS```.
+
+autoreconf not found during bootstrap  
+&rarr; Ensure ```autoconf``` and ```automake``` are in ```ZOPEN_STABLE_DEPS``` and installed via zopen.
 
 # Contributing
-Contributions are welcome! Please follow the [zopen contribution guidelines](https://github.com/zopencommunity/meta/blob/main/CONTRIBUTING.md).
+Contributions are welcome! Please follow the zopen contribution guidelines.
+
