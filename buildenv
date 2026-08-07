@@ -25,17 +25,18 @@ export ZOPEN_RUNTIME_DEPS=""
 ###
 ### Settings for CMake build system
 zopen_init() {
-	/home/astonez/zopen/usr/local/zopen/autoconf/autoconf/bin/autoreconf -fi
+	autoreconf -fi
+	printf -- '-mzos-sys-include=/usr/include\n' > /tmp/clang_zos.cfg
 }
 export ZOPEN_CONFIGURE="./configure"
-export ZOPEN_CONFIGURE_OPTS="--prefix=\${ZOPEN_INSTALL_DIR}"
+export ZOPEN_CONFIGURE_OPTS="--prefix=\${ZOPEN_INSTALL_DIR} CC=ibm-clang64 CXX=ibm-clang++64"
 export ZOPEN_MAKE="make"
-export ZOPEN_MAKE_OPTS="all -C zdnn"
+export ZOPEN_MAKE_OPTS="all -C zdnn CFLAGS_INIT=\"-I/usr/include -isystem ${ZOSLIB_HOME}/include -include ${ZOSLIB_HOME}/include/zos-v2r5-symbolfixes.h -fzos-le-char-mode=ascii -m64 -mzos-target=zosv2r5 -march=z16 -fzvector -mzvector -D_POSIX_C_SOURCE=200809L\""
 export ZOPEN_MAKE_MINIMAL=Y
 export ZOPEN_INSTALL="make"
 export ZOPEN_INSTALL_OPTS="install"
-export ZOPEN_EXTRA_CFLAGS="-fzvector -mzvector -march=z16 -D_POSIX_C_SOURCE=200809L"
-export ZOPEN_EXTRA_CXXFLAGS="-fzvector -mzvector -march=z16 -D_POSIX_C_SOURCE=200809L"
+export ZOPEN_EXTRA_CFLAGS="-fzvector -mzvector -march=z16 -D_POSIX_C_SOURCE=200809L --config /tmp/clang_zos.cfg"
+export ZOPEN_EXTRA_CXXFLAGS="-fzvector -mzvector -march=z16 -D_POSIX_C_SOURCE=200809L --config /tmp/clang_zos.cfg"
 # ZOPEN_CHECK is often 'ctest' or a custom function.
 #export ZOPEN_CHECK="ctest"
 #export ZOPEN_CHECK_OPTS="--test-dir ../build --output-on-failure"
